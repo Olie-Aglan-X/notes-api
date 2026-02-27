@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: notes-api
+  namespace: ai-platform
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: notes-api
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 15s
