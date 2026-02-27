@@ -145,7 +145,7 @@ Record of decisions reflected in the **notes-api** repository and their tradeoff
 | Image          | GHCR, SHA tags         | Pinned to SHA; manual manifest bump; GHCR dependency |
 | Namespace      | ai-platform            | Shared; no isolation                          |
 | Ingress        | Traefik, one host      | Hardcoded host; no TLS in repo                 |
-| GitOps/apply   | Kustomize              | Simple; no templating                         |
+| GitOps/apply   | ArgoCD + Kustomize     | Git = source of truth; ArgoCD sync, self-heal, prune |
 | Observability  | ServiceMonitor         | Depends on Prometheus Operator                |
 | Health         | Single /health         | No separate liveness vs dependency readiness  |
 | Security       | Non-root, no auth      | Good base; no API auth                        |
@@ -164,3 +164,15 @@ These decisions are suitable for Phase 1 / dev; production will require addressi
 - **Cons**: Rolling forward or back requires updating the image tag in `k8s/deployment.yaml`; if manifests are not updated correctly, the cluster may continue running an unintended version; runtime depends on GHCR availability.
 
 **Production risk**: Tag/manifest drift between GHCR and `k8s/deployment.yaml` can lead to confusion about which version is actually deployed; changes to GHCR availability or permissions will impact the ability to roll out new versions.
+
+---
+
+## 14. Adopt GitOps with ArgoCD
+
+**Decision**: Deployment to the cluster is GitOps-managed by ArgoCD. This repo is the source of truth for `k8s/`; ArgoCD (configured elsewhere to watch this repo) applies manifests with auto-sync, self-heal, and prune. The promote workflow (`.github/workflows/promote.yml`) updates `k8s/deployment.yaml` with the new image SHA after each successful build and pushes to git; no manual `kubectl apply` for normal releases.
+
+**Tradeoffs**:
+- **Pros**: Git is the single source of truth; audit trail for changes; ArgoCD keeps cluster aligned with git (auto-sync, self-heal, prune); rollback is git revert + sync; no need to run `kubectl apply` from a laptop.
+- **Cons**: ArgoCD must be installed and configured (outside this repo); operators need to understand GitOps flow; sync failures or RBAC misconfiguration can block deploys; manual apply is only a fallback.
+
+**Production risk**: If ArgoCD is down or the Application is misconfigured, releases block until fixed; ensure ArgoCD and repo access are operational and documented.

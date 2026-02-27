@@ -15,21 +15,19 @@ Operational procedures for **notes-api** on **k3s (Hetzner VPS)**. Assume `kubec
 ## Golden commands
 
 ```bash
-# Check current image and rollout
+# ArgoCD sync status (if ArgoCD CLI configured)
+argocd app get <notes-api-app-name>   # or use ArgoCD UI
+
+# Running image and pods
 kubectl get deployment notes-api -n ai-platform -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 kubectl get pods -n ai-platform -l app=notes-api -o jsonpath='{..image}{"\n"}'
 
-# Deploy (after updating image tag to desired SHA in k8s/deployment.yaml)
-kubectl apply -k k8s/
-
-# Check basic health
+# Basic health
 kubectl get pods -n ai-platform -l app=notes-api
 curl -s -H "Host: api.89.167.103.77.sslip.io" http://<VPS-IP>/health
 
-# Rollback
-kubectl rollout undo deployment/notes-api -n ai-platform
-kubectl rollout status deployment/notes-api -n ai-platform
-kubectl get deployment notes-api -n ai-platform -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+# Trigger sync (if auto-sync disabled)
+argocd app sync <notes-api-app-name>
 ```
 
 ---
@@ -54,12 +52,11 @@ This is not used by the Phase 2 deployment to k3s.
 
 ## 2. Image supply (Phase 2 and legacy)
 
-### Phase 2 (default) — GHCR pull
+### Phase 2 (default) — GHCR + ArgoCD GitOps
 
-- Deployment `k8s/deployment.yaml` references a GHCR image such as `ghcr.io/olie-aglan-x/notes-api:sha-ea0d59b` with `imagePullPolicy: IfNotPresent`.
-- Ensure the desired commit has a built image in GHCR (GitHub Actions run for that commit on `main` should be green).
-- Update the image tag in `k8s/deployment.yaml` to the desired SHA tag.
-- Apply manifests with `kubectl apply -k k8s/` (see §3).
+- Deployment `k8s/deployment.yaml` references a GHCR image (e.g. `ghcr.io/olie-aglan-x/notes-api:sha-ea0d59b`) with `imagePullPolicy: IfNotPresent`.
+- Image tag is updated in git by `.github/workflows/promote.yml` after each successful build. ArgoCD syncs the cluster from this repo; no manual `kubectl apply` for normal releases.
+- To release: push app changes to `main` → build runs → promote updates `k8s/deployment.yaml` and pushes → ArgoCD syncs (see §3).
 
 ### Phase 1 legacy — manual tar import to k3s
 
@@ -88,21 +85,24 @@ Use this legacy flow only if GHCR is temporarily unavailable or for one-off debu
 
 ---
 
-## 3. Deploy / apply manifests
+## 3. Deploy (GitOps — primary)
 
-From repository root:
+Releases are driven by git; ArgoCD applies manifests. No manual `kubectl apply` for normal releases.
 
-```bash
-kubectl apply -k k8s/
-```
+1. **Push to main** — Commit and push app (or other non-ignored) changes. `.github/workflows/build.yml` runs (ignores `k8s/**`, `docs/**`, `README.md`).
+2. **Build and promote** — After build succeeds, `.github/workflows/promote.yml` updates `k8s/deployment.yaml` with the new image SHA and pushes to the repo.
+3. **ArgoCD sync** — ArgoCD (configured to use this repo) detects the new commit and syncs. Verify with `argocd app get <app-name>` or ArgoCD UI; optionally run `argocd app sync <app-name>` if auto-sync is off.
 
-This applies (in order implied by Kustomize): namespace `ai-platform`, Deployment, Service, Ingress, ServiceMonitor.
-
-To preview:
+To preview what will be applied (from repo root):
 
 ```bash
 kubectl kustomize k8s/
-kubectl apply -k k8s/ --dry-run=client -o yaml
+```
+
+**Manual apply (fallback)** — Only if ArgoCD is unavailable or for one-off fixes:
+
+```bash
+kubectl apply -k k8s/
 ```
 
 ---
@@ -149,6 +149,13 @@ kubectl apply -k k8s/ --dry-run=client -o yaml
   curl -s http://api.89.167.103.77.sslip.io/health
   ```
 
+- **ArgoCD sync status** (if ArgoCD CLI is configured):
+
+  ```bash
+  argocd app get <notes-api-app-name>
+  ```
+  Check Sync Status and Health. Use ArgoCD UI if CLI is not available.
+
 - **Verify image running in pods:**
 
   ```bash
@@ -158,35 +165,43 @@ kubectl apply -k k8s/ --dry-run=client -o yaml
 
 ---
 
-## 5. Rollback
+## 5. Rollback (GitOps)
 
-If a new deployment is unhealthy:
+Roll back by reverting the desired state in git; ArgoCD will sync to the reverted state.
+
+1. **Revert the promote commit** (recommended — restores previous image SHA in git):
+
+   ```bash
+   git revert HEAD --no-edit    # if the latest commit is the promote
+   # or: git revert <commit-sha-of-promote>
+   git push
+   ```
+
+   Or manually edit `k8s/deployment.yaml`: set `image:` to a previous SHA tag (e.g. `ghcr.io/olie-aglan-x/notes-api:sha-<previous>`), then commit and push.
+
+2. **Wait for ArgoCD sync** — ArgoCD will apply the reverted manifest. Optionally trigger sync:
+
+   ```bash
+   argocd app sync <notes-api-app-name>
+   ```
+
+3. **Verify** — Confirm deployment and pods use the previous image:
+
+   ```bash
+   kubectl get deployment notes-api -n ai-platform -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+   kubectl get pods -n ai-platform -l app=notes-api -o jsonpath='{..image}{"\n"}'
+   kubectl rollout status deployment/notes-api -n ai-platform
+   curl -s -H "Host: api.89.167.103.77.sslip.io" http://<VPS-IP>/health
+   ```
+
+**In-cluster rollback (without changing git):** If you need to revert the running app without a git change (e.g. ArgoCD down):
 
 ```bash
 kubectl rollout undo deployment/notes-api -n ai-platform
-```
-
-Check status:
-
-```bash
 kubectl rollout status deployment/notes-api -n ai-platform
 ```
 
-To roll back to a specific revision:
-
-```bash
-kubectl rollout history deployment/notes-api -n ai-platform
-kubectl rollout undo deployment/notes-api -n ai-platform --to-revision=<revision>
-```
-
-After any rollback, verify the image tag:
-
-```bash
-kubectl get deployment notes-api -n ai-platform -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
-kubectl get pods -n ai-platform -l app=notes-api -o jsonpath='{..image}{"\n"}'
-```
-
-**Note**: Rollback reverts to a previous pod template (e.g. previous SHA image). You still need to ensure that the SHA tag in `k8s/deployment.yaml` matches the version you intend to run.
+Note: The next ArgoCD sync may overwrite this if git still has the new image; prefer git revert for a persistent rollback.
 
 ---
 
@@ -209,7 +224,7 @@ Replicas are fixed at 1 in `k8s/deployment.yaml`. To scale manually:
 kubectl scale deployment/notes-api -n ai-platform --replicas=2
 ```
 
-To make it permanent, edit `k8s/deployment.yaml` (`spec.replicas`) and re-apply with `kubectl apply -k k8s/`.
+To make it permanent, edit `k8s/deployment.yaml` (`spec.replicas`), commit and push — ArgoCD will sync; or run `kubectl apply -k k8s/` if not using ArgoCD.
 
 ---
 

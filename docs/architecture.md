@@ -54,15 +54,23 @@ This document describes the current architecture of **notes-api** based on the r
 
 ## Deployment model
 
-- **Build**: Dockerfile builds a single-stage image; GitHub Actions workflow `.github/workflows/build.yml` builds and pushes images to GHCR `ghcr.io/olie-aglan-x/notes-api` with SHA, branch, and `latest` tags.
-- **Apply**: Manifests are applied with Kustomize: `kubectl apply -k k8s/`. Order is implied by Kustomize (namespace first, then workload and service, then ingress and ServiceMonitor). No overlays or env-specific patches in repo.
-- **Rollout**: Standard Kubernetes Deployment; no canary or blue/green. Changing the image (e.g. tag) and re-applying triggers a rolling update. Rollback via `kubectl rollout undo deployment/notes-api -n ai-platform`.
+- **Build**: Dockerfile builds a single-stage image; GitHub Actions `.github/workflows/build.yml` builds and pushes to GHCR `ghcr.io/olie-aglan-x/notes-api` with SHA, branch, and `latest` tags.
+- **Image supply**: Deployment uses an immutable SHA tag (e.g. `ghcr.io/olie-aglan-x/notes-api:sha-ea0d59b`), `imagePullPolicy: IfNotPresent`. The tag is updated in git by the promote workflow, not by hand for normal releases.
+- **Apply**: GitOps — this repo is the source of truth. ArgoCD (configured to watch this repo) applies the `k8s/` directory (Kustomize). ArgoCD provides auto-sync, self-heal, and prune. Manual `kubectl apply -k k8s/` is not the primary release mechanism.
+- **Rollout**: Standard Kubernetes Deployment (rolling update). Changing the image tag in git (via promote workflow or manual edit) and pushing causes ArgoCD to sync and roll out the new image. Rollback: revert the image change in git and push; ArgoCD syncs to the previous state.
 - **Secrets/Config**: No ConfigMaps or Secrets referenced in the Deployment; no external config or credentials in repo.
 
 **Production risks (deployment)**:
-- CI: GitHub Actions builds and pushes images to GHCR, but there is no CD; updating manifests and applying them to the cluster is manual.
-- Deployment image is pinned to a specific SHA tag; operators must update `k8s/deployment.yaml` to roll forward or roll back.
-- No automated rollback or smoke tests after deploy.
+- ArgoCD must be installed and configured to use this repo; sync failures or misconfiguration are outside this repo.
+- Deployment image is pinned to a SHA; promote workflow updates it after each successful build; rollback requires git revert (or manual edit) and ArgoCD sync.
+- No automated smoke tests after deploy.
+
+### GitOps control loop
+
+1. **Push to main** (app code) → `build.yml` runs (paths-ignore: `k8s/**`, `docs/**`, `README.md`), builds image, pushes to GHCR with `sha-<commit>`.
+2. **Build succeeds** → `promote.yml` runs (triggered by `workflow_run` of build): checks out repo, sets `SHA_TAG=sha-${GITHUB_SHA::7}`, runs `sed` to replace the image line in `k8s/deployment.yaml`, commits and pushes with message `GitOps: promote image ... [skip ci]`.
+3. **Git updated** → ArgoCD (when configured to track this repo) sees the new commit, syncs the cluster to match `k8s/` (Kustomize). Auto-sync, self-heal, and prune keep cluster state aligned with git.
+4. **Rollback** → Revert the promote commit (or manually set image to a previous SHA in `k8s/deployment.yaml`) and push; ArgoCD syncs to the reverted state.
 
 ---
 
@@ -78,7 +86,7 @@ This document describes the current architecture of **notes-api** based on the r
 1. **Single replica** — no redundancy; pod or node failure causes downtime.
 2. **No TLS on Ingress** — TLS must be added at ingress or LB for production.
 3. **Hardcoded Ingress host** — `api.89.167.103.77.sslip.io` is environment-specific; other environments need host/path changes.
-4. **Image supply** — Deployment depends on GHCR being available and on manifests being updated to the correct SHA tag for each release or rollback.
+4. **Image supply** — Deployment depends on GHCR; the promote workflow updates the SHA in git after each build; ArgoCD applies the change. Rollback is git revert + ArgoCD sync.
 5. **No persistence** — ingest and search are placeholders; no database or storage.
 6. **No auth** — all endpoints are unauthenticated.
 7. **ServiceMonitor dependency** — metrics scraping depends on Prometheus Operator (or compatible) with matching `release: monitoring`.
