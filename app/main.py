@@ -18,7 +18,7 @@ async def count_requests(request, call_next):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": "phase2-test"}
 
 @app.get("/ingest")
 def ingest():
