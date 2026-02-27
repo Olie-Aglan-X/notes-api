@@ -1,0 +1,50 @@
+name: Promote SHA to GitOps manifests
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Docker Image"]
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+env:
+  IMAGE_NAME: ghcr.io/olie-aglan-x/notes-api
+
+jobs:
+  promote:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Compute SHA tag
+        run: |
+          echo "SHA_TAG=sha-${GITHUB_SHA::7}" >> $GITHUB_ENV
+          echo "Using tag: $SHA_TAG"
+
+      - name: Update k8s deployment image
+        run: |
+          set -euxo pipefail
+          # Replace image line in k8s/deployment.yaml
+          sed -i "s#image: .*#image: ${IMAGE_NAME}:${SHA_TAG}#g" k8s/deployment.yaml
+
+      - name: Commit and push if changed
+        run: |
+          set -euxo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git add k8s/deployment.yaml
+          git commit -m "GitOps: promote image ${IMAGE_NAME}:${SHA_TAG} [skip ci]"
+          git push

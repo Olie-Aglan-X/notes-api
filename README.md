@@ -9,7 +9,7 @@ Phase 1: FastAPI service deployed on k3s with Prometheus monitoring.
 - Ingress: Traefik (default k3s)
 - Monitoring: kube-prometheus-stack (Prometheus + Grafana)
 - Packaging: Kustomize (`kubectl apply -k k8s/`)
-- Deployment model: manual image import (Phase 1)
+- Deployment model: GHCR + GitHub Actions (Phase 2; Phase 1 manual image import is legacy)
 
 ## For new engineers
 
@@ -44,7 +44,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 docker build -t notes-api:local .
 ```
 
-The cluster is configured to use `notes-api:local` with `imagePullPolicy: Never` (image must be available on the node).
+The Phase 2 deployment uses images built and pushed by GitHub Actions to `ghcr.io/olie-aglan-x/notes-api` (including SHA-based tags). The local build is for debugging and legacy/manual flows only.
 
 ### Deploy to k8s (k3s)
 
@@ -63,17 +63,21 @@ docker save notes-api:local | ssh <k3s-node> 'sudo k3s ctr images import -'
    ```
 3. Check: `kubectl get pods -n ai-platform -l app=notes-api`
 
-## Deployment Model (Phase 1)
+## Deployment model
 
-- Image is built locally as `notes-api:local`
-- Image is manually imported into k3s container runtime
-- `imagePullPolicy: Never` is used
-- No CI/CD or registry integration yet
+**Phase 2 (current)**
 
-This will be replaced in Phase 2 by:
-- GHCR-based image registry
-- Automated build pipeline
-- Versioned image tags
+- Container images are built and pushed by GitHub Actions workflow `.github/workflows/build.yml` to GHCR `ghcr.io/olie-aglan-x/notes-api`.
+- Kubernetes Deployment (`k8s/deployment.yaml`) pulls an immutable SHA tag (for example `ghcr.io/olie-aglan-x/notes-api:sha-ea0d59b`) with `imagePullPolicy: IfNotPresent`.
+- Releases are performed by updating the image tag in `k8s/deployment.yaml` to the desired SHA and applying `kubectl apply -k k8s/`.
+
+**Phase 1 legacy (manual tar import)**
+
+- Image was built locally as `notes-api:local`.
+- Image was manually imported into the k3s container runtime via `docker save | k3s ctr images import`.
+- Deployment used `notes-api:local` with `imagePullPolicy: Never`.
+
+Phase 1 is kept in the documentation as a fallback path only; Phase 2 (GHCR + SHA tags) is the default.
 
 ## Repository layout
 
@@ -100,8 +104,8 @@ This will be replaced in Phase 2 by:
 ## Phase 1 limitations / risks
 
 - **Single node**: No HA; node failure causes full outage.
-- **Manual deploy**: No CI/CD; build, image import, and `kubectl apply` are manual.
-- **Local image**: `notes-api:local` and `imagePullPolicy: Never` require importing the image on the node (no registry pull).
+- **Manual deploy**: No CD; `kubectl apply -k k8s/` and image tag changes are manual (even though images are built and pushed by CI).
+- **Image pinning**: Deployment uses a GHCR image pinned to a specific SHA; rolling forward/rollback requires updating manifests to the correct SHA.
 - **No automated tests or rollback** in pipeline.
 
 See [docs/architecture.md](docs/architecture.md) and [docs/decisions.md](docs/decisions.md) for full limitations and production risks.

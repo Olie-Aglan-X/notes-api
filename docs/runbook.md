@@ -7,7 +7,7 @@ Operational procedures for **notes-api** on **k3s (Hetzner VPS)**. Assume `kubec
 ## Prerequisites
 
 - `kubectl` context pointing to the k3s cluster.
-- Docker (for building). Image must be available on the k3s node (Phase 1: manual import; see §2).
+- Docker (optional, for local builds / debugging). Phase 2 images are built and pushed by GitHub Actions to GHCR; Phase 1 manual import is legacy (see §2).
 - For ServiceMonitor: Prometheus Operator (or compatible) installed with selector matching `release: monitoring`.
 
 ---
@@ -15,61 +15,76 @@ Operational procedures for **notes-api** on **k3s (Hetzner VPS)**. Assume `kubec
 ## Golden commands
 
 ```bash
-# Build and ship image to k3s node (from dev machine)
-docker build -t notes-api:local .
-docker save notes-api:local | ssh <k3s-node> 'sudo k3s ctr images import -'
+# Check current image and rollout
+kubectl get deployment notes-api -n ai-platform -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+kubectl get pods -n ai-platform -l app=notes-api -o jsonpath='{..image}{"\n"}'
 
-# Deploy
+# Deploy (after updating image tag to desired SHA in k8s/deployment.yaml)
 kubectl apply -k k8s/
 
-# Check
+# Check basic health
 kubectl get pods -n ai-platform -l app=notes-api
 curl -s -H "Host: api.89.167.103.77.sslip.io" http://<VPS-IP>/health
 
 # Rollback
 kubectl rollout undo deployment/notes-api -n ai-platform
+kubectl rollout status deployment/notes-api -n ai-platform
+kubectl get deployment notes-api -n ai-platform -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 ```
 
 ---
 
 ## 1. Build the image
 
-From repository root:
+Phase 2 images are built and pushed automatically by GitHub Actions workflow `.github/workflows/build.yml`:
+
+- Triggered on pushes to `main` or via `workflow_dispatch`.
+- Builds the Dockerfile in the repo and pushes to `ghcr.io/olie-aglan-x/notes-api`.
+- Tags include a SHA-based tag (e.g. `sha-ea0d59b`), branch-based tags, and `latest`.
+
+**Optional (local debug only)**: you can still build an image locally:
 
 ```bash
 docker build -t notes-api:local .
 ```
 
-For a specific version (recommended for rollbacks):
-
-```bash
-docker build -t notes-api:v1.2.3 .
-```
-
-**Note**: Deployment currently uses `notes-api:local` and `imagePullPolicy: Never`. To use a versioned image you must update `k8s/deployment.yaml` (image name and optionally pull policy) and re-apply.
+This is not used by the Phase 2 deployment to k3s.
 
 ---
 
-## 2. Supply the image to the cluster (k3s)
+## 2. Image supply (Phase 2 and legacy)
 
-The manifest uses `imagePullPolicy: Never`, so the image must exist on the k3s node that will run the pod.
+### Phase 2 (default) — GHCR pull
 
-**Option A — k3s ctr import (from dev machine):** Save the image and pipe to k3s containerd on the VPS:
+- Deployment `k8s/deployment.yaml` references a GHCR image such as `ghcr.io/olie-aglan-x/notes-api:sha-ea0d59b` with `imagePullPolicy: IfNotPresent`.
+- Ensure the desired commit has a built image in GHCR (GitHub Actions run for that commit on `main` should be green).
+- Update the image tag in `k8s/deployment.yaml` to the desired SHA tag.
+- Apply manifests with `kubectl apply -k k8s/` (see §3).
 
-```bash
-docker save notes-api:local | ssh <k3s-node> 'sudo k3s ctr images import -'
-```
+### Phase 1 legacy — manual tar import to k3s
 
-Replace `<k3s-node>` with your Hetzner VPS host (SSH config alias or IP). If kubectl uses a different user/host, use the same SSH target as for the node where the pod runs.
+The legacy flow uses a locally built `notes-api:local` image and imports it into k3s:
 
-**Option B — On the VPS directly:** SSH to the VPS, then either copy a saved tarball and import, or use a registry:
+- The manifest referenced `notes-api:local` with `imagePullPolicy: Never`.
+- To reproduce this path:
 
-```bash
-# On the VPS (after copying image tar or building there):
-sudo k3s ctr images import notes-api-local.tar
-```
+  **Option A — k3s ctr import (from dev machine):**
 
-**Option C — Use a registry:** Change the deployment image to e.g. `your-registry/notes-api:v1.2.3` and set `imagePullPolicy: Always` (or omit). Ensure image pull secrets and network access are configured on the cluster.
+  ```bash
+  docker build -t notes-api:local .
+  docker save notes-api:local | ssh <k3s-node> 'sudo k3s ctr images import -'
+  ```
+
+  Replace `<k3s-node>` with your Hetzner VPS host (SSH config alias or IP). If kubectl uses a different user/host, use the same SSH target as for the node where the pod runs.
+
+  **Option B — On the VPS directly:**
+
+  ```bash
+  # On the VPS (after copying image tar or building there):
+  sudo k3s ctr images import notes-api-local.tar
+  ```
+
+Use this legacy flow only if GHCR is temporarily unavailable or for one-off debugging.
 
 ---
 
@@ -134,6 +149,13 @@ kubectl apply -k k8s/ --dry-run=client -o yaml
   curl -s http://api.89.167.103.77.sslip.io/health
   ```
 
+- **Verify image running in pods:**
+
+  ```bash
+  kubectl get deployment notes-api -n ai-platform -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+  kubectl get pods -n ai-platform -l app=notes-api -o jsonpath='{..image}{"\n"}'
+  ```
+
 ---
 
 ## 5. Rollback
@@ -157,7 +179,14 @@ kubectl rollout history deployment/notes-api -n ai-platform
 kubectl rollout undo deployment/notes-api -n ai-platform --to-revision=<revision>
 ```
 
-**Note**: Rollback reverts to the previous pod template (e.g. previous image). If the image tag is unchanged (`notes-api:local`), you may need to rebuild and reload the image with the previous code, then trigger a rollout (e.g. by changing a label or re-applying).
+After any rollback, verify the image tag:
+
+```bash
+kubectl get deployment notes-api -n ai-platform -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+kubectl get pods -n ai-platform -l app=notes-api -o jsonpath='{..image}{"\n"}'
+```
+
+**Note**: Rollback reverts to a previous pod template (e.g. previous SHA image). You still need to ensure that the SHA tag in `k8s/deployment.yaml` matches the version you intend to run.
 
 ---
 

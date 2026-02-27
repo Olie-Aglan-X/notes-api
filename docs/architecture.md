@@ -11,12 +11,12 @@ This document describes the current architecture of **notes-api** based on the r
 - **Networking**:
   - **Service** `notes-api`: ClusterIP (default), port 80 → targetPort 8000, selector `app: notes-api`.
   - **Ingress** `notes-api`: IngressClassName `traefik`; single rule `host: api.89.167.103.77.sslip.io`, path `/` → Service port 80. No TLS block is defined in the manifest.
-- **Image**: Deployment uses `notes-api:local` with `imagePullPolicy: Never`, so the image is expected to be present on the node (e.g. loaded locally or pre-pulled), not from a remote registry.
+- **Image**: Deployment uses `ghcr.io/olie-aglan-x/notes-api:sha-<commit>` with `imagePullPolicy: IfNotPresent` (e.g. `ghcr.io/olie-aglan-x/notes-api:sha-ea0d59b`). The image is pulled from GHCR and pinned to a specific commit SHA.
 
 **Production risks (infrastructure)**:
 - Single replica: no high availability; node or pod failure causes full outage until reschedule.
 - Hardcoded Ingress host (IP in hostname) and no TLS: not suitable for production without changing host and adding TLS.
-- `imagePullPolicy: Never` and tag `:local`: deployment assumes a specific image supply process (e.g. load onto node); any other workflow requires changing the deployment.
+- Image is pinned to a specific SHA tag in GHCR: updating requires changing the manifest to a new SHA, and availability of GHCR is a dependency.
 
 ---
 
@@ -54,15 +54,22 @@ This document describes the current architecture of **notes-api** based on the r
 
 ## Deployment model
 
-- **Build**: Dockerfile builds a single-stage image; installs dependencies, copies `app/`, runs as non-root. No build args or multi-stage variant in repo.
+- **Build**: Dockerfile builds a single-stage image; GitHub Actions workflow `.github/workflows/build.yml` builds and pushes images to GHCR `ghcr.io/olie-aglan-x/notes-api` with SHA, branch, and `latest` tags.
 - **Apply**: Manifests are applied with Kustomize: `kubectl apply -k k8s/`. Order is implied by Kustomize (namespace first, then workload and service, then ingress and ServiceMonitor). No overlays or env-specific patches in repo.
 - **Rollout**: Standard Kubernetes Deployment; no canary or blue/green. Changing the image (e.g. tag) and re-applying triggers a rolling update. Rollback via `kubectl rollout undo deployment/notes-api -n ai-platform`.
 - **Secrets/Config**: No ConfigMaps or Secrets referenced in the Deployment; no external config or credentials in repo.
 
 **Production risks (deployment)**:
-- No CI/CD or pipeline in repo; image build and push/load are manual.
-- Image tag is fixed (`notes-api:local`); no versioned tags or change process documented in repo.
+- CI: GitHub Actions builds and pushes images to GHCR, but there is no CD; updating manifests and applying them to the cluster is manual.
+- Deployment image is pinned to a specific SHA tag; operators must update `k8s/deployment.yaml` to roll forward or roll back.
 - No automated rollback or smoke tests after deploy.
+
+---
+
+## Release artifact identity
+
+- GitHub Actions uses `docker/metadata-action` to tag images in GHCR with the Git commit SHA (e.g. `sha-ea0d59b`).
+- The Deployment is configured with one of these SHA tags, so the running image tag directly identifies the source commit.
 
 ---
 
@@ -71,7 +78,7 @@ This document describes the current architecture of **notes-api** based on the r
 1. **Single replica** — no redundancy; pod or node failure causes downtime.
 2. **No TLS on Ingress** — TLS must be added at ingress or LB for production.
 3. **Hardcoded Ingress host** — `api.89.167.103.77.sslip.io` is environment-specific; other environments need host/path changes.
-4. **Image supply** — `imagePullPolicy: Never` and `notes-api:local` assume image is loaded or available on the node; no registry flow in repo.
+4. **Image supply** — Deployment depends on GHCR being available and on manifests being updated to the correct SHA tag for each release or rollback.
 5. **No persistence** — ingest and search are placeholders; no database or storage.
 6. **No auth** — all endpoints are unauthenticated.
 7. **ServiceMonitor dependency** — metrics scraping depends on Prometheus Operator (or compatible) with matching `release: monitoring`.

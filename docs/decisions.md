@@ -30,6 +30,8 @@ Record of decisions reflected in the **notes-api** repository and their tradeoff
 
 **Decision**: Deployment uses a local image name and never pulls from a registry.
 
+**Status**: Legacy (Phase 1 only); superseded by Decision 13 (GHCR + immutable SHA tags).
+
 **Tradeoffs**:
 - **Pros**: Works with local or on-node images; no registry or pull-secrets setup for dev/k3s.
 - **Cons**: Not standard for production. Image supply is manual (load onto node or push to registry and change manifest). Tag `:local` is not versioned; rollbacks are ambiguous.
@@ -140,7 +142,7 @@ Record of decisions reflected in the **notes-api** repository and their tradeoff
 |----------------|------------------------|-----------------------------------------------|
 | App runtime    | FastAPI + Uvicorn      | Single process; scale via more pods           |
 | Replicas       | 1                      | No HA; single point of failure                |
-| Image          | local, Never pull      | Not versioned; manual supply                  |
+| Image          | GHCR, SHA tags         | Pinned to SHA; manual manifest bump; GHCR dependency |
 | Namespace      | ai-platform            | Shared; no isolation                          |
 | Ingress        | Traefik, one host      | Hardcoded host; no TLS in repo                 |
 | GitOps/apply   | Kustomize              | Simple; no templating                         |
@@ -150,3 +152,15 @@ Record of decisions reflected in the **notes-api** repository and their tradeoff
 | Config         | None                   | Add when adding dependencies                  |
 
 These decisions are suitable for Phase 1 / dev; production will require addressing the risks above (replicas, image strategy, TLS, auth, observability, and real ingest/search implementation).
+
+---
+
+## 13. GHCR + immutable SHA image tags
+
+**Decision**: Container images are built and pushed by GitHub Actions workflow `.github/workflows/build.yml` to GitHub Container Registry `ghcr.io/olie-aglan-x/notes-api`, using SHA-based tags (e.g. `sha-ea0d59b`). The Kubernetes Deployment is configured to pull a specific SHA tag.
+
+**Tradeoffs**:
+- **Pros**: Immutable tags tie each running image directly to a Git commit; easy to audit which commit is running; rollbacks can target a known SHA; works well with automated builds.
+- **Cons**: Rolling forward or back requires updating the image tag in `k8s/deployment.yaml`; if manifests are not updated correctly, the cluster may continue running an unintended version; runtime depends on GHCR availability.
+
+**Production risk**: Tag/manifest drift between GHCR and `k8s/deployment.yaml` can lead to confusion about which version is actually deployed; changes to GHCR availability or permissions will impact the ability to roll out new versions.

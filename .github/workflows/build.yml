@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "k8s/**"
+      - "docs/**"
+      - "README.md"
   workflow_dispatch:
 
 permissions:
