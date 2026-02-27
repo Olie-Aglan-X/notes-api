@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
       - name: notes-api
-        image: ghcr.io/olie-aglan-x/notes-api:sha-ea0d59b
+        image: ghcr.io/olie-aglan-x/notes-api:sha-bbbd612
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8000
